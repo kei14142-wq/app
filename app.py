@@ -420,4 +420,3 @@ with tab4:
         )
     else:
         st.info("Click 'Generate' to create the annual simulation and view trend comparisons.")
-EOF
