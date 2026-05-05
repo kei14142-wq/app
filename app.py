@@ -59,26 +59,28 @@ def process_and_profile_data(df):
     return df, profile_arrival, profile_stay, base_capacity
 
 def calc_parked_cars(df, target_date, freq='10min'):
-    """指定日の00:00を基準に滞在台数を計算（前日からの繰越しは無視して0リセット）"""
+    """指定日の00:00を基準に滞在台数を計算。終点での折り返しラインを防ぐため、範囲を厳密に指定"""
     start_dt = datetime.combine(target_date, datetime.min.time())
-    end_dt = start_dt + timedelta(days=1)
+    # 24:00を含まず、23:50までのレンジにする（これが横ラインを消すコツです）
+    end_dt = start_dt + timedelta(hours=23, minutes=50)
     time_range = pd.date_range(start=start_dt, end=end_dt, freq=freq)
+    
     if df.empty: return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": 0})
     
-    # 00:00を起点とした純粋な増減のみをカウント
     counts = []
     for t in time_range:
-        # その日に『入庫済み』かつ『未出庫』の車のみをカウント
-        # 前日以前に入庫していた車が出庫した場合はマイナスを許容するため、あえてin_time制限を緩和
+        # その瞬間に駐車している車をカウント
         mask = (df['in_time'] <= t) & (df['out_time'] > t)
         counts.append(mask.sum())
     
-    # 前日からの滞在車を排除し、00:00時点を0とする補正（リセット処理）
+    # 前日からの残留車を排除し、00:00時点を0とするリセット処理
     counts = np.array(counts) - counts[0]
     
-    return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": counts})
-
-def calc_in_out_hourly(df, target_date):
+    return pd.DataFrame({
+        "time_str": [t.strftime('%H:%M') for t in time_range], 
+        "parked_cars": counts
+    })
+    def calc_in_out_hourly(df, target_date):
     hours = pd.DataFrame({'hour': range(24)})
     if df.empty:
         hours['in_count'] = 0; hours['out_count'] = 0; hours['time_str'] = hours['hour'].apply(lambda x: f"{x:02d}:00")
