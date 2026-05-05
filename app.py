@@ -74,7 +74,8 @@ def process_and_profile_data(df):
     
     return df, profile_arrival, profile_stay, base_capacity
 
-def calc_parked_cars(df, target_date, freq='10T'):
+def calc_parked_cars(df, target_date, freq='10min'):
+    """【修正】freqを '10T' から '10min' に変更"""
     start_dt = datetime.combine(target_date, datetime.min.time())
     time_range = pd.date_range(start=start_dt, end=start_dt + timedelta(days=1), freq=freq)
     if df.empty: return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": 0})
@@ -419,3 +420,4 @@ with tab4:
         )
     else:
         st.info("Click 'Generate' to create the annual simulation and view trend comparisons.")
+EOF
