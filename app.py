@@ -59,28 +59,20 @@ def process_and_profile_data(df):
     return df, profile_arrival, profile_stay, base_capacity
 
 def calc_parked_cars(df, target_date, freq='10min'):
-    """指定日の00:00を基準に滞在台数を計算。終点での折り返しラインを防ぐため、範囲を厳密に指定"""
     start_dt = datetime.combine(target_date, datetime.min.time())
-    # 24:00を含まず、23:50までのレンジにする（これが横ラインを消すコツです）
+    # 23:50で止めることで、右端から左端への横ラインを消去
     end_dt = start_dt + timedelta(hours=23, minutes=50)
     time_range = pd.date_range(start=start_dt, end=end_dt, freq=freq)
-    
     if df.empty: return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": 0})
-    
     counts = []
     for t in time_range:
-        # その瞬間に駐車している車をカウント
         mask = (df['in_time'] <= t) & (df['out_time'] > t)
         counts.append(mask.sum())
-    
-    # 前日からの残留車を排除し、00:00時点を0とするリセット処理
+    # 00:00時点を0としてリセット。前日入庫車の出庫があればマイナスになる
     counts = np.array(counts) - counts[0]
-    
-    return pd.DataFrame({
-        "time_str": [t.strftime('%H:%M') for t in time_range], 
-        "parked_cars": counts
-    })
-    def calc_in_out_hourly(df, target_date):
+    return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": counts})
+
+def calc_in_out_hourly(df, target_date):
     hours = pd.DataFrame({'hour': range(24)})
     if df.empty:
         hours['in_count'] = 0; hours['out_count'] = 0; hours['time_str'] = hours['hour'].apply(lambda x: f"{x:02d}:00")
@@ -96,16 +88,15 @@ def calc_parked_cars(df, target_date, freq='10min'):
 def generate_daily_simulation(target_date, target_capacity, base_capacity, profile_arrival, profile_stay, run_id):
     multiplier = target_capacity / base_capacity if base_capacity > 0 else 1.0
     target_data = []
-    # カレンダーから正しい曜日を取得
-    weekday_idx = target_date.weekday()
-    day_arrival = profile_arrival[(profile_arrival['month'] == target_date.month) & (profile_arrival['weekday'] == weekday_idx)]
-    if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == weekday_idx].groupby('in_hour')['avg_cars'].mean().reset_index()
+    w_idx = target_date.weekday()
+    day_arrival = profile_arrival[(profile_arrival['month'] == target_date.month) & (profile_arrival['weekday'] == w_idx)]
+    if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == w_idx].groupby('in_hour')['avg_cars'].mean().reset_index()
     base_dt = datetime.combine(target_date, datetime.min.time())
     for hour in range(24):
         arr_row = day_arrival[day_arrival['in_hour'] == hour]
         if arr_row.empty: continue
         n_cars = np.random.poisson(arr_row['avg_cars'].values[0] * multiplier)
-        stay_row = profile_stay[(profile_stay['weekday'] == weekday_idx) & (profile_stay['in_hour'] == hour)]
+        stay_row = profile_stay[(profile_stay['weekday'] == w_idx) & (profile_stay['in_hour'] == hour)]
         stay_mean, stay_std = (stay_row['mean'].values[0], stay_row['std'].values[0]) if not stay_row.empty else (4.0, 2.0)
         for _ in range(n_cars):
             in_t = base_dt + timedelta(hours=hour, minutes=np.random.randint(0, 60))
