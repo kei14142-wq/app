@@ -12,7 +12,6 @@ if 'annual_run_id' not in st.session_state:
     st.session_state['annual_run_id'] = 0
 
 # --- 1. Data Processing Functions ---
-
 @st.cache_data
 def generate_university_sample():
     np.random.seed(42)
@@ -127,70 +126,19 @@ def generate_annual_simulation(year, target_capacity, base_capacity, profile_arr
         df['month'] = df['in_time'].dt.month; df['date'] = df['in_time'].dt.date
     return df
 
-# --- 2. UI Localization ---
 LANG = {
     "日本語": {
-        "title": "駐車場分析ダッシュボード",
-        "data_source": "データソース設定",
-        "select_source": "ソースを選択してください:",
-        "sample_univ": "サンプル: 大学データ",
-        "upload_csv": "CSVをアップロード",
-        "upload_help": "1年分の入出庫ログ(CSV)をアップロードしてください",
-        "load_success": "データの読み込みに成功しました",
-        "est_cap": "推定駐車枠数",
-        "total_rec": "総レコード数",
-        "tab_compare": "日別比較",
-        "tab_trend": "全体トレンド",
-        "tab_daily_sim": "実データ vs シミュレーション",
-        "tab_annual_sim": "年間シミュレーション",
-        "compare_header": "日別プロファイルの比較",
-        "select_dates": "比較する日付を選択:",
-        "metric_arr": "入庫台数",
-        "metric_stay": "平均滞在時間",
-        "graph_parked": "滞在台数の推移",
-        "graph_inout": "時間別入出庫ダイナミクス",
-        "graph_dist": "滞在時間の分布",
-        "regen": "再生成",
-        "gen_btn": "年間シミュレーションを実行",
-        "target_cap": "目標の駐車台数",
-        "download": "CSVをダウンロード"
+        "title": "駐車場分析ダッシュボード", "data_source": "データソース設定", "select_source": "ソースを選択してください:", "sample_univ": "サンプル: 大学データ", "upload_csv": "CSVをアップロード", "upload_help": "1年分の入出庫ログ(CSV)をアップロードしてください", "load_success": "データの読み込みに成功しました", "est_cap": "推定駐車枠数", "total_rec": "総レコード数", "tab_compare": "日別比較", "tab_trend": "全体トレンド", "tab_daily_sim": "実データ vs シミュレーション", "tab_annual_sim": "年間シミュレーション", "compare_header": "日別プロファイルの比較", "select_dates": "比較する日付を選択:", "metric_arr": "入庫台数", "metric_stay": "平均滞在時間", "graph_parked": "滞在台数の推移", "graph_inout": "時間別入出庫ダイナミクス", "graph_dist": "滞在時間の分布", "regen": "再生成", "gen_btn": "年間シミュレーションを実行", "target_cap": "目標の駐車台数", "download": "CSVをダウンロード"
     },
     "English": {
-        "title": "Parking Intelligence Dashboard",
-        "data_source": "Data Source",
-        "select_source": "Select Source:",
-        "sample_univ": "Sample: University Data",
-        "upload_csv": "Upload CSV",
-        "upload_help": "Upload 1-year in/out log (CSV)",
-        "load_success": "Data loaded successfully",
-        "est_cap": "Estimated Capacity",
-        "total_rec": "Total Records",
-        "tab_compare": "Compare Profiles",
-        "tab_trend": "Seasonal Trends",
-        "tab_daily_sim": "Daily Sim vs Real",
-        "tab_annual_sim": "Annual Simulation",
-        "compare_header": "Daily Profile Comparison",
-        "select_dates": "Select dates to compare:",
-        "metric_arr": "Arrivals",
-        "metric_stay": "Avg Stay",
-        "graph_parked": "Parked Vehicles",
-        "graph_inout": "Hourly In/Out Dynamics",
-        "graph_dist": "Stay Duration Distribution",
-        "regen": "Regenerate Sim",
-        "gen_btn": "Generate 1-Year Simulation",
-        "target_cap": "Target Capacity",
-        "download": "Download Data (CSV)"
+        "title": "Parking Intelligence Dashboard", "data_source": "Data Source", "select_source": "Select Source:", "sample_univ": "Sample: University Data", "upload_csv": "Upload CSV", "upload_help": "Upload 1-year in/out log (CSV)", "load_success": "Data loaded successfully", "est_cap": "Estimated Capacity", "total_rec": "Total Records", "tab_compare": "Compare Profiles", "tab_trend": "Seasonal Trends", "tab_daily_sim": "Daily Sim vs Real", "tab_annual_sim": "Annual Simulation", "compare_header": "Daily Profile Comparison", "select_dates": "Select dates to compare:", "metric_arr": "Arrivals", "metric_stay": "Avg Stay", "graph_parked": "Parked Vehicles", "graph_inout": "Hourly In/Out Dynamics", "graph_dist": "Stay Duration Distribution", "regen": "Regenerate Sim", "gen_btn": "Generate 1-Year Simulation", "target_cap": "Target Capacity", "download": "Download Data (CSV)"
     }
 }
 
-# --- 3. UI Setup ---
 st.set_page_config(layout="wide", page_title="Parking Intelligence")
 st.markdown("<style>h1, h2, h3, h4 { font-family: 'Helvetica Neue', sans-serif; font-weight: 300; }</style>", unsafe_allow_html=True)
-
-# Language Selector
 sel_lang = st.sidebar.selectbox("Language / 言語", ["日本語", "English"])
 T = LANG[sel_lang]
-
 st.title(T["title"])
 
 with st.sidebar:
@@ -267,10 +215,12 @@ with tab2:
 with tab3:
     st.markdown(f"### {T['tab_daily_sim']}")
     c_s1, c_s2, c_s3 = st.columns([2, 2, 1])
-    with c_s1: comp_dt = st.selectbox(T["select_dates"], available_dates)
+    with c_s1: comp_dt = st.selectbox(T["select_dates"], available_dates, key="sb_daily")
     with c_s2: s_cap = st.number_input(T["target_cap"], 10, 5000, int(base_capacity))
-    with c_s3: st.write(""); 
-        if st.button(T["regen"], use_container_width=True): st.session_state['daily_run_id'] += 1
+    with c_s3: 
+        st.write(""); 
+        if st.button(T["regen"], use_container_width=True): 
+            st.session_state['daily_run_id'] += 1
     s_df = generate_daily_simulation(comp_dt, s_cap, base_capacity, profile_arrival, profile_stay, st.session_state['daily_run_id'])
     r_df = df[df['in_time'].dt.date == comp_dt]
     r_p = calc_parked_cars(r_df, comp_dt); s_p = calc_parked_cars(s_df, comp_dt)
@@ -286,9 +236,11 @@ with tab4:
         c1, c2, c3, c4 = st.columns([1,1,2,1])
         with c1: t_yr = st.selectbox("Year", [2026, 2027])
         with c2: st.metric("Base", int(base_capacity))
-        with c3: t_cap = st.number_input(T["target_cap"], 10, 5000, int(base_capacity)*2)
-        with c4: st.write(""); 
-            if st.button("RUN", type="primary", use_container_width=True): st.session_state['annual_run_id'] += 1
+        with c3: t_cap = st.number_input(T["target_cap"], 10, 5000, int(base_capacity)*2, key="nb_ann")
+        with c4: 
+            st.write(""); 
+            if st.button("RUN", type="primary", use_container_width=True): 
+                st.session_state['annual_run_id'] += 1
     if st.session_state['annual_run_id'] > 0:
         sim_yr = generate_annual_simulation(t_yr, t_cap, base_capacity, profile_arrival, profile_stay, st.session_state['annual_run_id'])
         st.success(f"Generated: {len(sim_yr):,} records")
