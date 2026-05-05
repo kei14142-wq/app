@@ -59,10 +59,23 @@ def process_and_profile_data(df):
     return df, profile_arrival, profile_stay, base_capacity
 
 def calc_parked_cars(df, target_date, freq='10min'):
+    """指定日の00:00を基準に滞在台数を計算（前日からの繰越しは無視して0リセット）"""
     start_dt = datetime.combine(target_date, datetime.min.time())
-    time_range = pd.date_range(start=start_dt, end=start_dt + timedelta(days=1), freq=freq)
+    end_dt = start_dt + timedelta(days=1)
+    time_range = pd.date_range(start=start_dt, end=end_dt, freq=freq)
     if df.empty: return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": 0})
-    counts = [( (df['in_time'] <= t) & (df['out_time'] > t) ).sum() for t in time_range]
+    
+    # 00:00を起点とした純粋な増減のみをカウント
+    counts = []
+    for t in time_range:
+        # その日に『入庫済み』かつ『未出庫』の車のみをカウント
+        # 前日以前に入庫していた車が出庫した場合はマイナスを許容するため、あえてin_time制限を緩和
+        mask = (df['in_time'] <= t) & (df['out_time'] > t)
+        counts.append(mask.sum())
+    
+    # 前日からの滞在車を排除し、00:00時点を0とする補正（リセット処理）
+    counts = np.array(counts) - counts[0]
+    
     return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": counts})
 
 def calc_in_out_hourly(df, target_date):
@@ -81,14 +94,16 @@ def calc_in_out_hourly(df, target_date):
 def generate_daily_simulation(target_date, target_capacity, base_capacity, profile_arrival, profile_stay, run_id):
     multiplier = target_capacity / base_capacity if base_capacity > 0 else 1.0
     target_data = []
-    day_arrival = profile_arrival[(profile_arrival['month'] == target_date.month) & (profile_arrival['weekday'] == target_date.weekday())]
-    if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == target_date.weekday()].groupby('in_hour')['avg_cars'].mean().reset_index()
+    # カレンダーから正しい曜日を取得
+    weekday_idx = target_date.weekday()
+    day_arrival = profile_arrival[(profile_arrival['month'] == target_date.month) & (profile_arrival['weekday'] == weekday_idx)]
+    if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == weekday_idx].groupby('in_hour')['avg_cars'].mean().reset_index()
     base_dt = datetime.combine(target_date, datetime.min.time())
     for hour in range(24):
         arr_row = day_arrival[day_arrival['in_hour'] == hour]
         if arr_row.empty: continue
         n_cars = np.random.poisson(arr_row['avg_cars'].values[0] * multiplier)
-        stay_row = profile_stay[(profile_stay['weekday'] == target_date.weekday()) & (profile_stay['in_hour'] == hour)]
+        stay_row = profile_stay[(profile_stay['weekday'] == weekday_idx) & (profile_stay['in_hour'] == hour)]
         stay_mean, stay_std = (stay_row['mean'].values[0], stay_row['std'].values[0]) if not stay_row.empty else (4.0, 2.0)
         for _ in range(n_cars):
             in_t = base_dt + timedelta(hours=hour, minutes=np.random.randint(0, 60))
@@ -107,14 +122,15 @@ def generate_annual_simulation(year, target_capacity, base_capacity, profile_arr
     target_data = []
     for d in range(days_in_year):
         cur_date = start_date + timedelta(days=d)
-        day_arrival = profile_arrival[(profile_arrival['month'] == cur_date.month) & (profile_arrival['weekday'] == cur_date.weekday())]
-        if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == cur_date.weekday()].groupby('in_hour')['avg_cars'].mean().reset_index()
+        w_idx = cur_date.weekday()
+        day_arrival = profile_arrival[(profile_arrival['month'] == cur_date.month) & (profile_arrival['weekday'] == w_idx)]
+        if day_arrival.empty: day_arrival = profile_arrival[profile_arrival['weekday'] == w_idx].groupby('in_hour')['avg_cars'].mean().reset_index()
         base_dt = datetime.combine(cur_date, datetime.min.time())
         for hour in range(24):
             arr_row = day_arrival[day_arrival['in_hour'] == hour]
             if arr_row.empty: continue
             n_cars = np.random.poisson(arr_row['avg_cars'].values[0] * multiplier)
-            stay_row = profile_stay[(profile_stay['weekday'] == cur_date.weekday()) & (profile_stay['in_hour'] == hour)]
+            stay_row = profile_stay[(profile_stay['weekday'] == w_idx) & (profile_stay['in_hour'] == hour)]
             stay_mean, stay_std = (stay_row['mean'].values[0], stay_row['std'].values[0]) if not stay_row.empty else (4.0, 2.0)
             for _ in range(n_cars):
                 in_t = base_dt + timedelta(hours=hour, minutes=np.random.randint(0, 60))
@@ -177,14 +193,14 @@ with tab1:
                 c_m2.metric(T["metric_stay"], f"{day_df['stay_duration'].mean():.1f}h" if not day_df.empty else "0h")
             d_p = calc_parked_cars(df, dt); d_io = calc_in_out_hourly(df, dt)
             p_data.append({'dt': dt, 'dow': dow, 'parked': d_p, 'inout': d_io, 'raw': day_df})
-            if not d_p.empty: m_p = max(m_p, d_p['parked_cars'].max())
+            if not d_p.empty: m_p = max(m_p, d_p['parked_cars'].max(), abs(d_p['parked_cars'].min()))
         st.divider()
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(f"**1. {T['graph_parked']}**")
             f_p = go.Figure()
             for i, d in enumerate(p_data): f_p.add_trace(go.Scatter(x=d['parked']['time_str'], y=d['parked']['parked_cars'], name=str(d['dt']), line=dict(color=colors[i%3], width=2.5)))
-            f_p.update_layout(template=plotly_template, yaxis_range=[0, m_p*1.1], hovermode="x unified", margin=dict(l=20,r=20,t=30,b=20)); st.plotly_chart(f_p, use_container_width=True)
+            f_p.update_layout(template=plotly_template, hovermode="x unified", margin=dict(l=20,r=20,t=30,b=20)); st.plotly_chart(f_p, use_container_width=True)
         with c2:
             st.markdown(f"**2. {T['graph_inout']}**")
             f_io = go.Figure()
