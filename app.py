@@ -2,130 +2,164 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # ==========================================
-# 設定とUI
+# Session State & Config
 # ==========================================
-st.set_page_config(layout="wide", page_title="VGI Data Generator")
-st.title("VGIシミュレーション用 駐車場データ生成")
+st.set_page_config(layout="wide", page_title="Parking Intelligence & VGI Gen")
 
-with st.sidebar:
-    st.header("1. 基本設定")
-    target_year = st.selectbox("対象年", [2026, 2027], index=0)
-    # 「延べ」ではなく「何台の車をシミュレートするか」を主役に
-    total_ids = st.number_input("固有ID数 (登録車両数)", min_value=10, max_value=10000, value=1000, step=100)
-    # 頻度を調整するつまみ
-    avg_visits_per_year = st.slider("1台あたりの年間平均来場回数", min_value=1, max_value=200, value=20)
+if 'run_id' not in st.session_state:
+    st.session_state['run_id'] = 0
+
+# ==========================================
+# 1. ロジック：データ生成・プロファイリング
+# ==========================================
+
+@st.cache_data
+def generate_university_sample():
+    """大学のパターンを模したサンプルデータを生成"""
+    np.random.seed(42)
+    start_date = datetime(2025, 4, 1)
+    data = []
+    for d in range(365):
+        current_date = start_date + timedelta(days=d)
+        is_weekend = current_date.weekday() >= 5
+        n_cars = np.random.randint(5, 15) if is_weekend else np.random.randint(80, 150)
+        
+        in_hours = np.random.normal(9.0, 1.0, n_cars)
+        stay_durations = np.clip(np.random.normal(8.0, 2.0, n_cars), 1.0, 14.0)
+        
+        for i in range(n_cars):
+            in_time = current_date + timedelta(hours=int(in_hours[i]), minutes=int((in_hours[i]%1)*60))
+            out_time = in_time + timedelta(hours=stay_durations[i])
+            data.append({"car_id": 10000 + (i % 500), "in_time": in_time, "out_time": out_time})
+    return pd.DataFrame(data)
+
+def process_profile(df):
+    """実データから統計プロファイルを抽出"""
+    df['in_time'] = pd.to_datetime(df['in_time'])
+    df['out_time'] = pd.to_datetime(df['out_time'])
+    df['stay_h'] = (df['out_time'] - df['in_time']).dt.total_seconds() / 3600
+    df['hour'] = df['in_time'].dt.hour
+    df['weekday'] = df['in_time'].dt.weekday
     
-    st.header("2. ユーザー分布 (来場頻度の偏り)")
-    # Alphaが小さいほど「毎日来る人」と「たまにしか来ない人」の差が激しくなります
-    pareto_alpha = st.slider("偏り具合 (Alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
+    arrival_profile = df.groupby(['weekday', 'hour']).size().reset_index(name='count')
+    # 1日あたりの平均に正規化
+    days_per_wd = df.groupby('weekday')['in_time'].dt.date.nunique()
+    arrival_profile['avg_cars'] = arrival_profile.apply(lambda x: x['count'] / days_per_wd[x['weekday']], axis=1)
+    
+    stay_profile = df.groupby(['weekday', 'hour'])['stay_h'].agg(['mean', 'std']).fillna(1.0).reset_index()
+    
+    return arrival_profile, stay_profile
 
-    st.header("3. 時間帯ピークの調整")
-    in_peak_hour = st.slider("入庫ピーク (出勤)", min_value=5.0, max_value=12.0, value=8.5, step=0.5)
-    stay_mean = st.slider("平均滞在時間 (時間)", min_value=1.0, max_value=15.0, value=9.0, step=0.5)
-
-    if st.button("データ生成を実行", type="primary", use_container_width=True):
-        st.session_state['run_sim'] = True
-
-# ==========================================
-# 高速化ロジック
-# ==========================================
-def generate_vgi_data_fast(year, total_ids, avg_visits, alpha, in_peak, stay_mean):
+def generate_vgi_format(year, total_ids, alpha, arrival_prof, stay_prof, peak_offset=0):
+    """VGI用の1時間刻みログを生成 (in/out/home)"""
     np.random.seed(42)
     start_date = datetime(year, 1, 1)
-    days_in_year = 365
-
-    # 1. 各IDに年間何回来るかを割り振る (パレート分布)
-    total_target_visits = total_ids * avg_visits
-    raw_weights = (np.random.pareto(alpha, total_ids) + 1)
-    visits_per_id = np.round((raw_weights / raw_weights.sum()) * total_target_visits).astype(int)
-    # 最大365回に制限
-    visits_per_id = np.clip(visits_per_id, 0, 365)
-
-    user_ids = np.arange(10001, 10001 + total_ids)
     records = []
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    # 2. 各IDのレコードを生成
+    
+    # IDごとの頻度（パレート分布）
+    raw_weights = (np.random.pareto(alpha, total_ids) + 1)
+    visits_per_id = np.clip(np.round((raw_weights / raw_weights.mean()) * 20).astype(int), 1, 365)
+    
+    user_ids = np.arange(10001, 10001 + total_ids)
+    
+    progress = st.progress(0)
     for i, user_id in enumerate(user_ids):
-        num_visits = visits_per_id[i]
-        if num_visits == 0: continue
-            
-        # 訪問する日をランダムに決定
-        visit_days = np.random.choice(days_in_year, num_visits, replace=False)
-        
+        visit_days = np.random.choice(365, visits_per_id[i], replace=False)
         for d in visit_days:
-            current_date = start_date + timedelta(days=int(d))
+            cur_date = start_date + timedelta(days=int(d))
+            wd = cur_date.weekday()
             
-            # 入庫・滞在時間に少しのランダム性を加える
-            in_h = int(np.clip(np.random.normal(in_peak, 1.2), 0, 23))
-            s_h = int(np.clip(np.random.normal(stay_mean, 2.0), 1, 24))
-            out_h = min(23, in_h + s_h)
-
-            # 車が来た日の24時間分のログを生成
+            # プロファイルから入庫時間を選択
+            possible_hours = arrival_prof[arrival_prof['weekday'] == wd]
+            if possible_hours.empty: in_h = 9
+            else: in_h = np.random.choice(possible_hours['hour'], p=possible_hours['avg_cars']/possible_hours['avg_cars'].sum())
+            
+            in_h = int(np.clip(in_h + peak_offset, 0, 23))
+            
+            # 滞在時間
+            s_row = stay_prof[(stay_prof['weekday'] == wd) & (stay_prof['hour'] == in_h)]
+            s_mean = s_row['mean'].values[0] if not s_row.empty else 8.0
+            stay_h = int(np.clip(np.random.normal(s_mean, 2.0), 1, 24))
+            out_h = min(23, in_h + stay_h)
+            
             for h in range(24):
-                status = "home"
-                if h >= in_h and h < out_h:
-                    status = "in"
-                elif h == out_h:
-                    status = "out"
-                
+                status = "in" if in_h <= h < out_h else ("out" if h == out_h else "home")
                 records.append({
-                    "datetime": (current_date + timedelta(hours=h)).strftime("%Y-%m-%d %H:00:00.000"),
+                    "datetime": (cur_date + timedelta(hours=h)).strftime("%Y-%m-%d %H:00:00.000"),
                     "car_id": user_id,
                     "in_out": status
                 })
-        
-        # 進捗表示 (負荷軽減のため500件おき)
-        if i % 500 == 0:
-            progress_bar.progress((i + 1) / total_ids)
-            status_text.text(f"処理中: {i+1}/{total_ids} 台目...")
-
-    progress_bar.empty()
-    status_text.empty()
+        if i % 200 == 0: progress.progress((i+1)/total_ids)
     
+    progress.empty()
     return pd.DataFrame(records)
 
 # ==========================================
-# 実行と結果表示
+# 2. UI Layout
 # ==========================================
-if st.session_state.get('run_sim'):
-    with st.spinner("膨大なデータを構築中です..."):
-        df_result = generate_vgi_data_fast(target_year, total_ids, avg_visits_per_year, pareto_alpha, in_peak_hour, stay_mean)
-    
-    st.success(f"生成完了！ 総レコード数: {len(df_result):,} 件")
-    
-    tab1, tab2 = st.tabs(["データ確認", "統計・分布"])
-    
-    with tab1:
-        st.write("### 生成データ（最初の100件）")
-        st.dataframe(df_result.head(100), use_container_width=True)
-        
-        csv = df_result.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="CSVをダウンロード",
-            data=csv,
-            file_name=f"vgi_sim_{target_year}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+st.title("統合型 駐車場分析 & VGIデータ生成")
 
-    with tab2:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("### ユーザーごとの年間来場頻度")
-            freq_df = df_result[df_result['in_out'] == 'out'].groupby('car_id').size().reset_index(name='count')
-            fig1 = px.histogram(freq_df, x='count', nbins=30, labels={'count':'年間来場回数', 'y':'人数'})
-            st.plotly_chart(fig1, use_container_width=True)
+with st.sidebar:
+    st.header("1. データソース")
+    mode = st.radio("ソース選択", ["サンプル(大学)", "CSVアップロード"])
+    if mode == "CSVアップロード":
+        up = st.file_uploader("入出庫ログ(in_time, out_time列)をアップロード")
+        if up: raw_df = pd.read_csv(up)
+        else: st.stop()
+    else:
+        raw_df = generate_university_sample()
+    
+    st.divider()
+    st.header("2. VGI生成パラメータ")
+    gen_year = st.selectbox("対象年", [2026, 2027])
+    gen_ids = st.number_input("登録車両数", 10, 5000, 500)
+    gen_alpha = st.slider("頻度の偏り(Alpha)", 0.5, 3.0, 1.2)
+    peak_shift = st.slider("ピーク時間の補正(h)", -3.0, 3.0, 0.0)
+
+# プロファイル抽出
+arrival_prof, stay_prof = process_profile(raw_df)
+
+tab_anal, tab_vgi = st.tabs(["実データ分析", "VGIデータ生成"])
+
+# --- Tab 1: 分析 (元のコードの機能) ---
+with tab1:
+    st.subheader("現在の利用パターン分析")
+    col1, col2 = st.columns(2)
+    with col1:
+        fig_arr = px.bar(arrival_prof, x='hour', y='avg_cars', color='weekday', title="時間帯別・曜日別の平均流入台数")
+        st.plotly_chart(fig_arr, use_container_width=True)
+    with col2:
+        fig_stay = px.box(raw_df, x='weekday', y='stay_h', title="曜日別滞在時間分布")
+        st.plotly_chart(fig_stay, use_container_width=True)
+
+# --- Tab 2: VGI生成 (新しい機能) ---
+with tab2:
+    st.subheader("VGIシミュレーション用データ生成")
+    st.info("実データのパターンをベースに、指定したID数と偏りで1年分のログを生成します。")
+    
+    if st.button("VGIデータ生成開始", type="primary", use_container_width=True):
+        with st.spinner("生成中..."):
+            vgi_df = generate_vgi_format(gen_year, gen_ids, gen_alpha, arrival_prof, stay_prof, peak_shift)
+            st.session_state['vgi_result'] = vgi_df
+            
+    if 'vgi_result' in st.session_state:
+        res = st.session_state['vgi_result']
+        st.success(f"生成完了: {len(res):,}レコード")
         
-        with col2:
-            st.write("### 時間帯別の入庫(in)・出庫(out)分布")
-            # inとoutのみ抽出して時間帯を集計
-            move_df = df_result[df_result['in_out'].isin(['in', 'out'])].copy()
-            move_df['hour'] = pd.to_datetime(move_df['datetime']).dt.hour
-            fig2 = px.histogram(move_df, x='hour', color='in_out', barmode='group', nbins=24)
-            st.plotly_chart(fig2, use_container_width=True)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.dataframe(res.head(100), use_container_width=True)
+        with c2:
+            csv = res.to_csv(index=False).encode('utf-8')
+            st.download_button("CSVをダウンロード", csv, f"vgi_sim_{gen_year}.csv", "text/csv", use_container_width=True)
+            
+            # 検証グラフ
+            st.write("### 生成データのチェック")
+            check_df = res[res['in_out'].isin(['in', 'out'])].copy()
+            check_df['h'] = pd.to_datetime(check_df['datetime']).dt.hour
+            fig_check = px.histogram(check_df, x='h', color='in_out', barmode='group', title="生成データの入出庫ピーク")
+            st.plotly_chart(fig_check, use_container_width=True)
