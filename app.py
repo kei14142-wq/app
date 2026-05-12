@@ -207,10 +207,9 @@ def convert_to_vgi_hourly_format(df_events, year, all_car_ids):
         return pd.DataFrame()
     
     # 高速化のため、イベントログから日別の遷移辞書を作成
-    # in_timeのhour、out_timeのhourを抽出
-    df_events['in_h'] = df_events['in_time'].dt.floor('H')
-    df_events['out_h'] = df_events['out_time'].dt.floor('H')
-    
+  # in_timeのhour、out_timeのhourを抽出（小文字の 'h' に変更）
+    df_events['in_h'] = df_events['in_time'].dt.floor('h')
+    df_events['out_h'] = df_events['out_time'].dt.floor('h')
     # 巨大なデータフレームをメモリ上で作るとクラッシュするため、
     # 該当年に実際に動いたIDと日時だけに絞り、ジェネレータ的に構築する
     records = []
