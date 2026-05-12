@@ -8,213 +8,217 @@ from datetime import datetime, timedelta
 # ==========================================
 # Session State Initialization
 # ==========================================
-if 'daily_run_id' not in st.session_state:
-    st.session_state['daily_run_id'] = 0
-if 'annual_run_id' not in st.session_state:
-    st.session_state['annual_run_id'] = 0
+if 'sim_events' not in st.session_state:
+    st.session_state['sim_events'] = pd.DataFrame()
+if 'sim_car_ids' not in st.session_state:
+    st.session_state['sim_car_ids'] = []
 
 # ==========================================
-# 1. 状態遷移ロジックのコア関数
-# ==========================================
-
-def get_hourly_status_dense(df_events, target_date, car_ids):
-    """
-    指定日の24時間分を in, out, home で完全に埋めたDataFrameを返す
-    """
-    base_dt = datetime.combine(target_date, datetime.min.time())
-    hours = [base_dt + timedelta(hours=i) for i in range(24)]
-    
-    records = []
-    # 処理対象の日付のイベントを抽出
-    day_events = df_events[df_events['in_time'].dt.date == target_date]
-    
-    for cid in car_ids:
-        # このIDの今日のイベントを取得
-        cid_events = day_events[day_events['car_id'] == cid]
-        
-        # 24時間分のスロットをデフォルト 'home' で作成
-        status_map = {h: "home" for h in hours}
-        
-        for _, row in cid_events.iterrows():
-            t_in_start = row['in_time'].replace(minute=0, second=0, microsecond=0)
-            t_out_start = row['out_time'].replace(minute=0, second=0, microsecond=0)
-            
-            # 1. 'in' の埋め（滞在中）
-            curr = t_in_start
-            while curr <= t_out_start:
-                if curr in status_map:
-                    status_map[curr] = "in"
-                curr += timedelta(hours=1)
-            
-            # 2. 'out' の埋め（前後1時間。inと重なる場合はin優先）
-            t_before = t_in_start - timedelta(hours=1)
-            t_after = t_out_start + timedelta(hours=1)
-            
-            if t_before in status_map and status_map[t_before] != "in":
-                status_map[t_before] = "out"
-            if t_after in status_map and status_map[t_after] != "in":
-                status_map[t_after] = "out"
-        
-        for h, s in status_map.items():
-            records.append({"datetime": h, "car_id": cid, "status": s})
-            
-    return pd.DataFrame(records)
-
-# ==========================================
-# 2. Data Processing & Simulation Engines
+# 1. Simulation Engine (VGI Logic)
 # ==========================================
 
 @st.cache_data
-def generate_university_sample():
-    np.random.seed(42)
-    start_date = datetime(2025, 4, 1)
-    data = []
-    for d in range(365):
-        cur_date = start_date + timedelta(days=d)
-        is_weekend = cur_date.weekday() >= 5
-        n_cars = np.random.randint(5, 15) if is_weekend else np.random.randint(50, 100)
-        
-        for i in range(n_cars):
-            in_h = np.random.normal(9, 1)
-            stay = np.random.normal(6, 2)
-            in_t = cur_date + timedelta(hours=int(in_h))
-            out_t = in_t + timedelta(hours=max(1, int(stay)))
-            data.append({"car_id": 10000 + (i % 500), "in_time": in_t, "out_time": out_t})
-    return pd.DataFrame(data)
-
-@st.cache_data
-def process_data(df):
-    df['in_time'] = pd.to_datetime(df['in_time'])
-    df['out_time'] = pd.to_datetime(df['out_time'])
-    df['date'] = df['in_time'].dt.date
-    return df
-
-@st.cache_data
-def generate_vgi_simulation(year, num_ids, pareto_alpha, arr_mean, arr_std, dep_mean, dep_std, run_id):
+def run_id_based_simulation(year, num_ids, pareto_alpha, arr_mean, arr_std, dep_mean, dep_std, profile_arrival, base_capacity, run_id):
+    """IDごとの来訪イベントを生成する (タブ4のパラメータを全タブで共有)"""
     np.random.seed(run_id)
-    id_weights = (np.random.pareto(pareto_alpha, num_ids) + 1.0)
-    id_weights = id_weights / id_weights.mean()
+    id_weights = np.random.pareto(pareto_alpha, num_ids) + 1.0 
+    id_weights = id_weights / id_weights.mean() 
     car_ids = np.arange(10001, 10001 + num_ids)
     
     start_date = datetime(year, 1, 1)
+    days_in_year = (datetime(year, 12, 31) - start_date).days + 1
     event_data = []
-    for d in range(365):
+    
+    daily_macro_factors = {}
+    for month in range(1, 13):
+        for w_idx in range(7):
+            day_arrival = profile_arrival[(profile_arrival['month'] == month) & (profile_arrival['weekday'] == w_idx)]
+            daily_cars = day_arrival['avg_cars'].sum() if not day_arrival.empty else base_capacity * 0.5
+            base_prob = min(daily_cars / max(num_ids, 1) * 2.0, 1.0) 
+            daily_macro_factors[(month, w_idx)] = base_prob
+
+    for d in range(days_in_year):
         cur_date = start_date + timedelta(days=d)
-        # 基本来訪確率（曜日の影響）
-        base_prob = 0.1 if cur_date.weekday() >= 5 else 0.4
-        day_probs = np.clip(base_prob * id_weights, 0, 1)
-        active_ids = car_ids[np.random.rand(num_ids) < day_probs]
+        month, w_idx = cur_date.month, cur_date.weekday()
+        base_dt = datetime.combine(cur_date, datetime.min.time())
+        day_probs = np.clip(daily_macro_factors[(month, w_idx)] * id_weights, 0, 1)
+        visits = np.random.rand(num_ids) < day_probs
+        active_ids = car_ids[visits]
         
         for cid in active_ids:
-            in_h = np.clip(np.random.normal(arr_mean, arr_std), 0, 22)
-            out_h = np.clip(np.random.normal(dep_mean, dep_std), in_h + 1, 23.9)
+            in_h = int(np.clip(np.random.normal(arr_mean, arr_std), 1, 22))
+            dep_h = int(np.clip(np.random.normal(dep_mean, dep_std), in_h + 1, 23))
+            
             event_data.append({
                 "car_id": cid,
-                "in_time": cur_date + timedelta(hours=int(in_h)),
-                "out_time": cur_date + timedelta(hours=int(out_h))
+                "date": cur_date.date(),
+                "in_h": in_h,
+                "out_h": dep_h
             })
+            
     return pd.DataFrame(event_data), car_ids
 
-# ==========================================
-# 3. UI Implementation
-# ==========================================
+def generate_dense_vgi_log(df_events, year, car_ids, target_date=None):
+    """1時間ごとの全スロットを home/in/out で埋める"""
+    if df_events.empty:
+        return pd.DataFrame()
 
-st.set_page_config(layout="wide", page_title="VGI Dense Simulator")
-st.title("VGI 1時間粒度ステータス・シミュレータ")
-
-# Sidebar Data Loading
-with st.sidebar:
-    st.header("1. データソース")
-    data_mode = st.radio("ソース選択", ["サンプルデータ", "CSVアップロード"])
-    if data_mode == "サンプルデータ":
-        raw_df = generate_university_sample()
-    else:
-        uploaded = st.file_uploader("イベントログ(in_time, out_time, car_id)", type="csv")
-        if uploaded: raw_df = pd.read_csv(uploaded)
-        else: st.stop()
+    # 特定の日付が指定された場合はフィルタリング
+    work_df = df_events[df_events['date'] == target_date] if target_date else df_events
     
-    df = process_data(raw_df)
-    unique_ids = sorted(df['car_id'].unique())
-    available_dates = sorted(df['date'].unique())
+    results = []
+    # 処理を高速化するため辞書形式でイベントを保持
+    event_dict = {}
+    for _, row in work_df.iterrows():
+        event_dict[(row['car_id'], row['date'])] = (row['in_h'], row['out_h'])
 
-tab1, tab2, tab3, tab4 = st.tabs(["日別遷移プレビュー", "全体統計", "既存シミュ同期", "年間VGI生成"])
-
-# --- Tab 1: 日別遷移プレビュー ---
-with tab1:
-    st.subheader("1時間ごとのステータス遷移（in/out/home）")
-    c1, c2 = st.columns(2)
-    with c1: sel_date = st.selectbox("日付選択", available_dates, key="t1_date")
-    with c2: sel_id = st.multiselect("ID選択（最大5件）", unique_ids, default=unique_ids[:3])
+    dates = [target_date] if target_date else sorted(df_events['date'].unique())
     
-    if sel_id:
-        dense_df = get_hourly_status_dense(df, sel_date, sel_id)
-        
-        # タイムラインチャート
-        fig = px.timeline(dense_df, x_start="datetime", 
-                          x_end=dense_df["datetime"] + timedelta(hours=1), 
-                          y="car_id", color="status",
-                          color_discrete_map={"in": "#2ecc71", "out": "#e67e22", "home": "#3498db"},
-                          category_orders={"status": ["home", "out", "in"]})
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(xaxis_title="時刻", yaxis_title="Car ID", height=300)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.write("データ詳細 (1時間粒度):")
-        st.dataframe(dense_df.pivot(index="datetime", columns="car_id", values="status"), use_container_width=True)
-
-# --- Tab 2: 全体統計 ---
-with tab2:
-    st.subheader("1時間粒度での利用トレンド")
-    # 全IDの平均的な1日のステータス分布
-    sample_date = available_dates[0]
-    all_dense = get_hourly_status_dense(df, sample_date, unique_ids[:100]) # 負荷軽減のため100台サンプル
-    hourly_dist = all_dense.groupby([all_dense['datetime'].dt.hour, 'status']).size().reset_index(name='count')
-    
-    fig_dist = px.bar(hourly_dist, x='datetime', y='count', color='status',
-                      title=f"{sample_date} のステータス分布 (Sample 100 IDs)",
-                      color_discrete_map={"in": "#2ecc71", "out": "#e67e22", "home": "#3498db"})
-    st.plotly_chart(fig_dist, use_container_width=True)
-
-# --- Tab 3: 既存シミュ同期 ---
-with tab3:
-    st.subheader("既存シミュレーション結果の1時間化")
-    st.info("このタブでは既存の入出庫分布に基づくシミュレーションを1時間ステータスに変換して表示します。")
-    if st.button("シミュレーション実行 & 1時間化"):
-        st.session_state['daily_run_id'] += 1
-        # 簡易的な再生成と表示
-        sim_events = df.sample(frac=0.5) # 既存分布を模したサンプル
-        dense_sim = get_hourly_status_dense(sim_events, available_dates[0], unique_ids[:10])
-        st.dataframe(dense_sim.head(24), use_container_width=True)
-
-# --- Tab 4: 年間VGI生成 ---
-with tab4:
-    st.subheader("高密度年間シミュレーション生成")
-    with st.container(border=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            v_num_ids = st.number_input("ID数", 1, 10000, 100)
-            v_pareto = st.slider("頻度の偏り", 1.0, 5.0, 1.5)
-        with c2:
-            v_arr = st.slider("出勤ピーク", 6.0, 12.0, 9.0)
-            v_arr_s = st.slider("出勤バラツキ", 0.5, 3.0, 1.0)
-        with c3:
-            v_dep = st.slider("退勤ピーク", 15.0, 21.0, 18.0)
-            v_dep_s = st.slider("退勤バラツキ", 0.5, 3.0, 1.5)
+    for dt in dates:
+        base_dt = datetime.combine(dt, datetime.min.time())
+        for cid in car_ids:
+            # デフォルトは24時間すべて home
+            statuses = ["home"] * 24
             
-        if st.button("年間フルデータ生成 (in/out/home)", type="primary"):
-            st.session_state['annual_run_id'] += 1
+            if (cid, dt) in event_dict:
+                in_h, out_h = event_dict[(cid, dt)]
+                # 入庫前の移動 (out)
+                if in_h > 0: statuses[in_h - 1] = "out"
+                # 滞在 (in)
+                for h in range(in_h, out_h):
+                    statuses[h] = "in"
+                # 退庫の移動 (out)
+                statuses[out_h] = "out"
+            
+            for h in range(24):
+                results.append({
+                    "datetime": base_dt + timedelta(hours=h),
+                    "car_id": cid,
+                    "in_out": statuses[h]
+                })
+                
+    return pd.DataFrame(results)
 
-    if st.session_state['annual_run_id'] > 0:
-        events, c_ids = generate_vgi_simulation(2026, v_num_ids, v_pareto, v_arr, v_arr_s, v_dep, v_dep_s, st.session_state['annual_run_id'])
+# ==========================================
+# 2. Main UI & Tabs Logic
+# ==========================================
+
+st.set_page_config(layout="wide", page_title="Parking VGI Dashboard")
+st.title("駐車場分析 & VGIシミュレータ")
+
+# サイドバー：シミュレーション設定
+with st.sidebar:
+    st.header("1. 基本プロファイル（分析元）")
+    # ここでは既存の大学サンプルを使用
+    raw_df = pd.read_csv("sample_parking.csv") if False else None # ファイルがあれば読み込み
+    
+    @st.cache_data
+    def get_base_profile():
+        # 内部でサンプルを生成
+        np.random.seed(42)
+        data = []
+        for d in range(365):
+            dt = datetime(2025, 4, 1) + timedelta(days=d)
+            n = np.random.randint(50, 100)
+            for _ in range(n):
+                in_h = np.random.normal(9, 1)
+                stay = np.random.normal(5, 2)
+                data.append({"in_time": dt + timedelta(hours=in_h), "out_time": dt + timedelta(hours=in_h+stay)})
+        df = pd.DataFrame(data)
+        df['month'] = df['in_time'].dt.month
+        df['weekday'] = df['in_time'].dt.weekday
+        df['in_hour'] = df['in_time'].dt.hour
+        avg_arrival = df.groupby(['month', 'weekday', 'in_hour']).size().reset_index(name='total')
+        avg_arrival['avg_cars'] = avg_arrival['total'] / 52 # 概算
+        return avg_arrival, 100.0 # base_capacity
+    
+    profile_arrival, base_capacity = get_base_profile()
+
+    st.header("2. IDベース生成パラメータ")
+    t_yr = st.selectbox("対象年", [2026, 2027])
+    num_ids = st.number_input("登録ID数 (1-10000)", 1, 10000, 1000)
+    pareto_alpha = st.slider("利用頻度の偏り", 1.0, 5.0, 1.5)
+    arr_peak = st.slider("出勤ピーク時間", 6, 12, 9)
+    dep_peak = st.slider("退勤ピーク時間", 15, 21, 17)
+    
+    if st.button("シミュレーション実行・更新", type="primary"):
+        st.session_state['sim_events'], st.session_state['sim_car_ids'] = run_id_based_simulation(
+            t_yr, num_ids, pareto_alpha, arr_peak, 1.0, dep_peak, 1.5, 
+            profile_arrival, base_capacity, 42
+        )
+        st.success("生成完了")
+
+if st.session_state['sim_events'].empty:
+    st.warning("サイドバーの「シミュレーション実行」を押してデータを生成してください。")
+    st.stop()
+
+df_ev = st.session_state['sim_events']
+car_ids = st.session_state['sim_car_ids']
+
+tab1, tab2, tab3, tab4 = st.tabs(["日別比較", "全体トレンド", "日別シミュレーション表示", "VGIログ生成・DL"])
+
+# --- Tab 1: 日別比較 ---
+with tab1:
+    st.subheader("IDベース生成結果の日別比較")
+    dates = sorted(df_ev['date'].unique())
+    sel_dates = st.multiselect("日付選択", dates, default=dates[:2])
+    
+    if sel_dates:
+        fig = go.Figure()
+        for i, dt in enumerate(sel_dates):
+            # 滞在台数(in)を計算
+            day_data = df_ev[df_ev['date'] == dt]
+            hourly_counts = [((day_data['in_h'] <= h) & (day_data['out_h'] > h)).sum() for h in range(24)]
+            fig.add_trace(go.Scatter(x=[f"{h:02d}:00" for h in range(24)], y=hourly_counts, name=str(dt)))
         
-        st.success(f"{len(events)} 件のイベントを生成。")
-        
-        # プレビューとして1日分を密に変換
-        preview_dense = get_hourly_status_dense(events, datetime(2026, 1, 1).date(), c_ids[:10])
-        st.markdown("#### 1月1日のプレビュー（最初の10台）")
-        st.dataframe(preview_dense.pivot(index="datetime", columns="car_id", values="status"), use_container_width=True)
-        
-        # CSVダウンロード用（全データの変換は重いため、イベントベースでのダウンロードを推奨しつつ、
-        # 1時間粒度への変換ロジックを同梱したCSV構成を提示）
-        st.info("VGIシステムへ：本CSVの欠損時間はすべて 'home' として処理してください。")
-        st.download_button("イベントログをダウンロード", events.to_csv(index=False), "vgi_events.csv")
+        fig.update_layout(title="滞在台数の推移 (in状態)", xaxis_title="時間", yaxis_title="台数", template="plotly_white")
+        st.plotly_chart(fig, use_container_width=True)
+
+# --- Tab 2: 全体トレンド ---
+with tab2:
+    st.subheader("生成データの月別・曜日別利用傾向")
+    c1, c2 = st.columns(2)
+    df_ev['month'] = pd.to_datetime(df_ev['date']).dt.month
+    df_ev['weekday'] = pd.to_datetime(df_ev['date']).dt.weekday
+    
+    with c1:
+        m_trend = df_ev.groupby('month').size().reset_index(name='count')
+        st.plotly_chart(px.bar(m_trend, x='month', y='count', title="月別延べ利用数"), use_container_width=True)
+    with c2:
+        w_trend = df_ev.groupby('weekday').size().reset_index(name='count')
+        w_trend['day'] = w_trend['weekday'].map({0:'Mon',1:'Tue',2:'Wed',3:'Thu',4:'Fri',5:'Sat',6:'Sun'})
+        st.plotly_chart(px.bar(w_trend, x='day', y='count', title="曜日別延べ利用数"), use_container_width=True)
+
+# --- Tab 3: 日別シミュレーション表示 ---
+with tab3:
+    st.subheader("指定日の全IDステータス推移")
+    target_dt = st.selectbox("表示する日付", dates, key="tab3_date")
+    
+    # プレビュー用に最初の50ID分だけ表示
+    sample_vgi = generate_dense_vgi_log(df_ev, t_yr, car_ids[:50], target_date=target_dt)
+    
+    fig_heat = px.strip(sample_vgi, x="datetime", y="car_id", color="in_out",
+                        category_orders={"in_out": ["home", "out", "in"]},
+                        title="IDごとの状態遷移 (上位50ID)")
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+# --- Tab 4: VGIログ生成・DL ---
+with tab4:
+    st.subheader("VGIシステム用 1時間粒度トランザクションログ")
+    st.write(f"設定内容: {num_ids} ID / {t_yr}年 / 1時間ごとに全ステータスを補完")
+    
+    if st.button("全期間のCSVデータを作成（時間がかかる場合があります）"):
+        with st.spinner("CSV生成中..."):
+            # 大容量になるため、ここでは直近7日分をサンプルとして生成する例
+            # 全期間が必要な場合は car_ids を分割してループ処理することを推奨
+            full_vgi = generate_dense_vgi_log(df_ev, t_yr, car_ids)
+            
+            st.dataframe(full_vgi.head(100), use_container_width=True)
+            
+            csv = full_vgi.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="VGI形式のCSVをダウンロード",
+                data=csv,
+                file_name=f"vgi_log_{t_yr}_{num_ids}ids.csv",
+                mime='text/csv'
+            )
