@@ -206,7 +206,7 @@ def convert_to_full_vgi_format(df_events, year, all_car_ids):
 # ==========================================
 
 st.set_page_config(layout="wide", page_title="VGI Simulator V3")
-st.title("🚗 VGIシミュレータ (頻度モデル現実化版)")
+st.title("駐車場")
 
 raw_df = generate_university_sample()
 profile_arrival, profile_stay, base_capacity = process_and_profile_data(raw_df)
