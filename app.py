@@ -165,7 +165,7 @@ if st.sidebar.button("シミュレーション更新"):
     st.session_state['annual_run_id'] += 1
 
 # 年間シミュレーションの実行
-sim_events, all_ids = generate_vgi_annual_simulation(2026, num_ids, pareto_a, arr_m, 1.0, dep_m, 1.5, base_capacity, profile_arrival, st.session_state['annual_run_id'])
+sim_events, all_ids = generate_vgi_annual_simulation(2025, num_ids, pareto_a, arr_m, 1.0, dep_m, 1.5, base_capacity, profile_arrival, st.session_state['annual_run_id'])
 
 tab1, tab2, tab3, tab4 = st.tabs(["日別比較", "全体トレンド", "実データ vs シミュレーション", "VGIログ生成"])
 
