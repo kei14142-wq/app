@@ -121,7 +121,7 @@ def generate_vgi_log(df_events, year, all_car_ids, progress_bar, status_text):
 # ==========================================
 
 st.set_page_config(layout="wide", page_title="VGI Simulator (Layered Model)")
-st.title("🚗 VGIシミュレータ：固定層・イレギュラー層モデル")
+st.title("駐車場ログ")
 
 with st.sidebar:
     st.header("1. 基本設定")
