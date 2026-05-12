@@ -125,7 +125,7 @@ st.title("駐車場ログ")
 
 with st.sidebar:
     st.header("1. 基本設定")
-    t_yr = st.selectbox("対象年", [2025, 2026, 2027])
+    t_yr = st.selectbox("対象年", [2024, 2025, 2026, 2027])
     num_ids = st.number_input("登録ID数", 100, 10000, 1500)
     target_avg = st.number_input("目標の平均来訪台数/日", 10, 5000, 700)
     
