@@ -200,7 +200,7 @@ def convert_to_full_vgi_format(df_events, year, all_car_ids):
 # ==========================================
 
 st.set_page_config(layout="wide", page_title="Parking & VGI Simulator")
-st.title("🚗 駐車場分析 & VGIシミュレータ")
+st.title("駐車場分析")
 
 # データのロード（裏でプロファイルを作成）
 raw_df = generate_university_sample()
@@ -237,7 +237,7 @@ if 'sim_df' not in st.session_state or st.session_state.get('sim_run_id', 0) > 0
 sim_df = st.session_state['sim_df']
 available_dates = sorted(sim_df['date'].unique())
 
-tab1, tab2, tab3 = st.tabs(["日別比較 (シミュレーション結果)", "全体トレンド", "VGIログ生成 (CSV出力)"])
+tab1, tab2, tab3 = st.tabs(["日別比較 (シミュレーション結果)", "全体トレンド", "ログ生成 (CSV出力)"])
 colors = ['#2980b9', '#e67e22', '#27ae60']
 plotly_template = "plotly_white"
 
@@ -273,7 +273,7 @@ with tab1:
             st.plotly_chart(f_p, use_container_width=True)
             
         with c2:
-            st.markdown("**2. 時間別入出庫ダイナミクス**")
+            st.markdown("**2. 時間別入出庫**")
             f_io = go.Figure()
             for i, d in enumerate(p_data):
                 f_io.add_trace(go.Bar(x=d['inout']['time_str'], y=d['inout']['in_count'], name=f"IN: {d['dt']}", marker_color=colors[i%3], offsetgroup=i))
@@ -314,7 +314,7 @@ with tab2:
 
 # --- Tab 3: VGIログ生成 ---
 with tab3:
-    st.markdown("### VGIシステム用 状態遷移ログエクスポート")
+    st.markdown("### ログエクスポート")
     st.info("サイドバーで設定したシミュレーションの全IDの1年分の推移（約876万行）を、指定の `home / in / out` フォーマットで展開します。")
     
     if st.button("詳細ログを展開してダウンロード準備", type="primary"):
