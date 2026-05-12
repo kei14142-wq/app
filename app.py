@@ -47,7 +47,7 @@ def process_profile(df):
     
     arrival_profile = df.groupby(['weekday', 'hour']).size().reset_index(name='count')
     # 1日あたりの平均に正規化
-    days_per_wd = df.groupby('weekday')['in_time'].dt.date.nunique()
+    days_per_wd = df.groupby('weekday')['in_time'].apply(lambda x: x.dt.date.nunique())
     arrival_profile['avg_cars'] = arrival_profile.apply(lambda x: x['count'] / days_per_wd[x['weekday']], axis=1)
     
     stay_profile = df.groupby(['weekday', 'hour'])['stay_h'].agg(['mean', 'std']).fillna(1.0).reset_index()
