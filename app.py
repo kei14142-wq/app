@@ -12,315 +12,235 @@ import time
 
 @st.cache_data
 def generate_university_sample():
+    """大学の利用パターンを模したサンプル（プロファイル作成用）"""
     np.random.seed(42)
     start_date = datetime(2025, 4, 1)
     days = 365
     data = []
-    
     for d in range(days):
         current_date = start_date + timedelta(days=d)
-        month = current_date.month
         is_weekend = current_date.weekday() >= 5
+        n_cars = np.random.randint(5, 15) if is_weekend else np.random.randint(80, 150)
         
-        if is_weekend: n_cars = np.random.randint(5, 15)
-        elif month in [8, 9, 2, 3]: n_cars = np.random.randint(30, 60)
-        else: n_cars = np.random.randint(80, 150)
-            
-        if n_cars == 0: continue
-            
         n_morning = int(n_cars * 0.6)
-        n_afternoon = n_cars - n_morning
-        in_hours = np.concatenate([
-            np.random.normal(9.0, 1.0, n_morning),
-            np.random.normal(13.5, 1.5, n_afternoon)
-        ])
+        in_hours = np.concatenate([np.random.normal(9.0, 1.0, n_morning), np.random.normal(13.5, 1.5, n_cars - n_morning)])
         in_hours = np.clip(in_hours, 0, 23.0)
         stay_durations = np.clip(np.random.normal(5.0, 2.5, n_cars), 1.0, 15.0)
         
         for i in range(n_cars):
-            h = int(in_hours[i])
-            in_time = current_date + timedelta(hours=h)
-            out_time = in_time + timedelta(hours=int(stay_durations[i]))
-            
-            data.append({
-                "in_time": in_time.strftime("%Y-%m-%d %H:%M:%S"), 
-                "out_time": out_time.strftime("%Y-%m-%d %H:%M:%S")
-            })
+            in_t = current_date + timedelta(hours=int(in_hours[i]))
+            out_t = in_t + timedelta(hours=int(stay_durations[i]))
+            data.append({"in_time": in_t, "out_time": out_t})
     return pd.DataFrame(data)
 
 @st.cache_data
 def process_and_profile_data(df):
+    """生データから到着率と滞在時間の分布プロファイルを抽出"""
     df['in_time'] = pd.to_datetime(df['in_time'])
     df['out_time'] = pd.to_datetime(df['out_time'])
     df['stay_duration'] = (df['out_time'] - df['in_time']).dt.total_seconds() / 3600.0
     
-    days_count = df.groupby([df['in_time'].dt.month.rename('month'), df['in_time'].dt.weekday.rename('weekday')])['in_time'].apply(lambda x: x.dt.date.nunique()).reset_index(name='num_days')
-    arrivals = df.groupby([df['in_time'].dt.month.rename('month'), df['in_time'].dt.weekday.rename('weekday'), df['in_time'].dt.hour.rename('in_hour')]).size().reset_index(name='total_cars')
+    # 到着率プロファイル
+    df['month'] = df['in_time'].dt.month
+    df['weekday'] = df['in_time'].dt.weekday
+    df['in_hour'] = df['in_time'].dt.hour
+    
+    days_count = df.groupby(['month', 'weekday'])['in_time'].apply(lambda x: x.dt.date.nunique()).reset_index(name='num_days')
+    arrivals = df.groupby(['month', 'weekday', 'in_hour']).size().reset_index(name='total_cars')
     profile_arrival = pd.merge(arrivals, days_count, on=['month', 'weekday'])
     profile_arrival['avg_cars'] = profile_arrival['total_cars'] / profile_arrival['num_days']
     
-    profile_stay = df.groupby([df['in_time'].dt.weekday.rename('weekday'), df['in_time'].dt.hour.rename('in_hour')])['stay_duration'].agg(['mean', 'std']).reset_index()
+    # 滞在時間プロファイル
+    profile_stay = df.groupby(['weekday', 'in_hour'])['stay_duration'].agg(['mean', 'std']).reset_index()
+    profile_stay['std'] = profile_stay['std'].fillna(1.0)
     
-    daily_counts = df.groupby(df['in_time'].dt.date).size()
-    base_capacity = daily_counts.quantile(0.95) if not daily_counts.empty else 21.0
-    
+    base_capacity = df.groupby(df['in_time'].dt.date).size().quantile(0.95)
     return profile_arrival, profile_stay, base_capacity
 
-def calc_parked_cars(df, target_date, freq='10min'):
-    start_dt = datetime.combine(target_date, datetime.min.time())
-    end_dt = start_dt + timedelta(hours=23, minutes=50) 
-    time_range = pd.date_range(start=start_dt, end=end_dt, freq=freq)
-    if df.empty: return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": 0})
-    counts = [( (df['in_time'] <= t) & (df['out_time'] > t) ).sum() for t in time_range]
-    counts = np.array(counts) - counts[0]
-    return pd.DataFrame({"time_str": [t.strftime('%H:%M') for t in time_range], "parked_cars": counts})
-
-def calc_in_out_hourly(df, target_date):
-    hours = pd.DataFrame({'hour': range(24)})
-    if df.empty:
-        hours['in_count'] = 0
-        hours['out_count'] = 0
-        hours['time_str'] = hours['hour'].apply(lambda x: f"{x:02d}:00")
-        return hours
-    in_df = df[df['in_time'].dt.date == target_date].groupby('in_hour').size().reset_index(name='in_count')
-    out_df = df[df['out_time'].dt.date == target_date].groupby('out_hour').size().reset_index(name='out_count')
-    res = pd.merge(hours, in_df, left_on='hour', right_on='in_hour', how='left')
-    res = pd.merge(res, out_df, left_on='hour', right_on='out_hour', how='left').fillna(0)
-    res['time_str'] = res['hour'].apply(lambda x: f"{x:02d}:00")
-    return res
-
 # ==========================================
-# 2. VGI Simulation Engine
+# 2. Unified Simulation Engine
 # ==========================================
 
-# @st.cache_data を外してプログレスバーを動的に描画できるようにする
-def generate_vgi_simulation_with_progress(year, num_ids, regular_ratio, target_daily_cars, arr_shift, stay_scale, profile_arrival, profile_stay, progress_bar, status_text):
+def run_simulation(year, num_ids, regular_ratio, target_daily_cars, arr_shift, stay_scale, profile_arrival, profile_stay, progress_bar, status_text):
     np.random.seed(int(time.time()))
     
+    # ユーザー頻度モデル
     num_regular = int(num_ids * (regular_ratio / 100.0))
-    num_medium = int((num_ids - num_regular) * 0.4) 
-    num_light = num_ids - num_regular - num_medium 
-
-    prob_regular = np.random.normal(4.0/7.0, 1.0/7.0, num_regular)
-    prob_medium = np.random.normal(1.5/7.0, 0.5/7.0, num_medium)
-    prob_light = np.random.normal(0.2/7.0, 0.1/7.0, num_light)
-
-    base_probs = np.concatenate([prob_regular, prob_medium, prob_light])
-    base_probs = np.clip(base_probs, 0.01, 0.95) 
-    np.random.shuffle(base_probs) 
-    car_ids = np.arange(1, 1 + num_ids) 
+    num_medium = int((num_ids - num_regular) * 0.4)
+    num_light = num_ids - num_regular - num_medium
     
-    current_mean_prob = np.mean(base_probs)
-    target_mean_prob = target_daily_cars / num_ids
-    scale_factor = target_mean_prob / current_mean_prob if current_mean_prob > 0 else 1.0
-    base_probs = np.clip(base_probs * scale_factor, 0.005, 0.98) 
+    base_probs = np.concatenate([
+        np.random.normal(4.5/7.0, 1.0/7.0, num_regular),
+        np.random.normal(2.0/7.0, 0.5/7.0, num_medium),
+        np.random.normal(0.5/7.0, 0.2/7.0, num_light)
+    ])
+    base_probs = np.clip(base_probs, 0.02, 0.95)
+    np.random.shuffle(base_probs)
+    car_ids = np.arange(1, 1 + num_ids)
+    
+    # スケーリング
+    scale_factor = (target_daily_cars / num_ids) / np.mean(base_probs)
+    base_probs = np.clip(base_probs * scale_factor, 0.01, 0.98)
 
+    # 季節・曜日の波
     daily_factors = {}
     for month in range(1, 13):
         for w_idx in range(7):
             day_arrival = profile_arrival[(profile_arrival['month'] == month) & (profile_arrival['weekday'] == w_idx)]
             daily_factors[(month, w_idx)] = day_arrival['avg_cars'].sum() if not day_arrival.empty else 1.0
-    mean_factor = np.mean(list(daily_factors.values())) if daily_factors else 1.0
-    for k in daily_factors: daily_factors[k] /= mean_factor
+    m_val = np.mean(list(daily_factors.values()))
+    for k in daily_factors: daily_factors[k] /= m_val
 
+    # イベント生成
     start_date = datetime(year, 1, 1)
-    days_in_year = (datetime(year, 12, 31) - start_date).days + 1
     event_data = []
-
-    # プログレスバーの更新 (365日ループ)
-    for d in range(days_in_year):
-        if d % 10 == 0:  # 10日ごとにUIを更新
-            progress = int((d / days_in_year) * 100)
-            progress_bar.progress(progress)
-            status_text.text(f"年間利用イベントをシミュレート中... ({d}/{days_in_year} 日目)")
+    for d in range(365):
+        if d % 20 == 0:
+            progress_bar.progress(int((d / 365) * 50))
+            status_text.text(f"シミュレーション生成中... {d}/365日")
             
         cur_date = start_date + timedelta(days=d)
         month, w_idx = cur_date.month, cur_date.weekday()
-        base_dt = datetime.combine(cur_date, datetime.min.time())
-        
         day_probs = np.clip(base_probs * daily_factors.get((month, w_idx), 1.0), 0, 1)
-        visits = np.random.rand(num_ids) < day_probs
-        active_ids = car_ids[visits]
+        active_ids = car_ids[np.random.rand(num_ids) < day_probs]
         
-        day_arrival = profile_arrival[(profile_arrival['month'] == month) & (profile_arrival['weekday'] == w_idx)]
-        arr_probs = day_arrival['avg_cars'].values if not day_arrival.empty else np.array([1])
-        arr_hours = day_arrival['in_hour'].values if not day_arrival.empty else np.array([9])
-        if arr_probs.sum() > 0: arr_probs = arr_probs / arr_probs.sum()
-        
+        p_arr = profile_arrival[(profile_arrival['month'] == month) & (profile_arrival['weekday'] == w_idx)]
+        arr_h_dist = p_arr['in_hour'].values if not p_arr.empty else [9]
+        arr_p_dist = p_arr['avg_cars'].values / p_arr['avg_cars'].sum() if not p_arr.empty else [1]
+
         for cid in active_ids:
-            base_in_h = np.random.choice(arr_hours, p=arr_probs)
-            in_hour = np.clip(base_in_h + arr_shift, 0, 22.0)
+            base_h = np.random.choice(arr_h_dist, p=arr_p_dist)
+            in_h = np.clip(base_h + arr_shift + np.random.normal(0, 0.5), 0, 22)
             
-            stay_row = profile_stay[(profile_stay['weekday'] == w_idx) & (profile_stay['in_hour'] == int(base_in_h))]
-            stay_mean = stay_row['mean'].values[0] if not stay_row.empty else 4.0
-            stay_duration = max(1.0, stay_mean * stay_scale)
+            p_stay = profile_stay[(profile_stay['weekday'] == w_idx) & (profile_stay['in_hour'] == int(base_h))]
+            s_mean = p_stay['mean'].values[0] if not p_stay.empty else 5.0
+            s_std = p_stay['std'].values[0] if not p_stay.empty else 2.0
+            # バラつきを持たせてサンプリング
+            duration = max(1.0, np.random.normal(s_mean, s_std) * stay_scale)
             
-            in_t = base_dt + timedelta(hours=int(in_hour))
-            out_t = in_t + timedelta(hours=int(stay_duration))
+            in_t = datetime.combine(cur_date, datetime.min.time()) + timedelta(hours=int(in_h))
+            out_t = in_t + timedelta(hours=int(duration))
+            event_data.append({"car_id": cid, "in_time": in_t, "out_time": out_t, "stay_duration": duration})
             
-            event_data.append({"car_id": cid, "in_time": in_t, "out_time": out_t})
-            
-    progress_bar.progress(100)
-    status_text.text("イベントの生成完了！データを構築しています...")
-    
-    df_events = pd.DataFrame(event_data)
-    if not df_events.empty:
-        df_events['stay_duration'] = (df_events['out_time'] - df_events['in_time']).dt.total_seconds() / 3600.0
-        df_events['date'] = df_events['in_time'].dt.date
-        df_events['month'] = df_events['in_time'].dt.month
-        df_events['weekday'] = df_events['in_time'].dt.weekday
-        df_events['in_hour'] = df_events['in_time'].dt.hour
-        df_events['out_hour'] = df_events['out_time'].dt.hour
-        
-    return df_events, car_ids
+    df_res = pd.DataFrame(event_data)
+    df_res['date'] = df_res['in_time'].dt.date
+    df_res['month'] = df_res['in_time'].dt.month
+    df_res['weekday'] = df_res['in_time'].dt.weekday
+    df_res['in_hour'] = df_res['in_time'].dt.hour
+    df_res['out_hour'] = df_res['out_time'].dt.hour
+    return df_res, car_ids
 
-def convert_to_full_vgi_format_with_progress(df_events, year, all_car_ids, progress_bar, status_text):
+def generate_vgi_log(df_events, year, all_car_ids, progress_bar, status_text):
+    """イベントからステータスログ(hourly)を展開"""
     times = pd.date_range(start=f"{year}-01-01 00:00:00", end=f"{year}-12-31 23:00:00", freq='h')
-    num_times, num_ids = len(times), len(all_car_ids)
+    status_matrix = np.full((len(times), len(all_car_ids)), 'home', dtype=object)
+    id_map = {cid: i for i, cid in enumerate(all_car_ids)}
+    start_t = times[0]
     
-    status_text.text(f"初期化中... ({num_times} 時間 × {num_ids} ID の行列を作成)")
-    progress_bar.progress(10)
-    
-    status_matrix = np.full((num_times, num_ids), 'home', dtype=object)
-    car_id_to_idx = {cid: i for i, cid in enumerate(all_car_ids)}
-    
-    start_time = times[0]
-    total_events = len(df_events)
-    
-    # バッチ処理で進捗を更新
-    chunk_size = max(1, total_events // 20) 
-    
+    total = len(df_events)
     for i, (_, row) in enumerate(df_events.iterrows()):
-        if i % chunk_size == 0:
-            progress = 10 + int((i / total_events) * 60) # 10% ~ 70% までマッピング
-            progress_bar.progress(progress)
-            status_text.text(f"ステータス上書き中... ({i:,} / {total_events:,} イベント完了)")
-
-        cid_idx = car_id_to_idx[row['car_id']]
-        idx_in = int((row['in_time'].floor('h') - start_time).total_seconds() // 3600)
-        idx_out = int((row['out_time'].floor('h') - start_time).total_seconds() // 3600)
+        if i % (total // 10 + 1) == 0:
+            progress_bar.progress(60 + int((i / total) * 35))
+            status_text.text(f"CSV変換中... {i}/{total}")
+            
+        cid_idx = id_map[row['car_id']]
+        idx_in = int((row['in_time'].floor('h') - start_t).total_seconds() // 3600)
+        idx_out = int((row['out_time'].floor('h') - start_t).total_seconds() // 3600)
         
-        if 0 <= idx_in < num_times:
-            status_matrix[idx_in:min(idx_out, num_times), cid_idx] = 'in'
-        if 0 <= idx_out < num_times:
+        if 0 <= idx_in < len(times):
+            status_matrix[idx_in:min(idx_out, len(times)), cid_idx] = 'in'
+        if 0 <= idx_out < len(times):
             status_matrix[idx_out, cid_idx] = 'out'
-
-    progress_bar.progress(80)
-    status_text.text("行列を展開してDataFrameに変換中... (最終ステップ)")
-
-    flat_status = status_matrix.flatten('F')
-    flat_ids = np.repeat(all_car_ids, num_times)
-    flat_times = np.tile(times, num_ids)
-    
-    df_res = pd.DataFrame({'datetime': flat_times, 'car_id': flat_ids, 'in_out': flat_status})
-    progress_bar.progress(100)
-    status_text.text("変換完了！")
-    return df_res
+            
+    df_vgi = pd.DataFrame({
+        'datetime': np.tile(times, len(all_car_ids)),
+        'car_id': np.repeat(all_car_ids, len(times)),
+        'in_out': status_matrix.flatten('F')
+    })
+    return df_vgi
 
 # ==========================================
-# 3. UI
+# 3. Main UI
 # ==========================================
 
-st.set_page_config(layout="wide", page_title="VGI Simulator V4")
-st.title("駐車場ログ)")
+st.set_page_config(layout="wide", page_title="Unified VGI Simulator")
+st.title("駐車場データ")
 
-raw_df = generate_university_sample()
-profile_arrival, profile_stay, base_capacity = process_and_profile_data(raw_df)
+# 初期データのロード
+raw_sample = generate_university_sample()
+prof_arr, prof_stay, base_cap = process_and_profile_data(raw_sample)
 
 with st.sidebar:
-    st.header("シミュレーション設定")
+    st.header("設定")
     t_yr = st.selectbox("対象年", [2025, 2026, 2027])
-    num_ids = st.number_input("登録ID数 (1-10000)", 1, 10000, 1000)
-    target_daily = st.number_input("平均来訪台数/日", 1, 10000, int(base_capacity))
-    
+    num_ids = st.number_input("登録ID数", 1, 10000, 1000)
+    target_avg = st.number_input("平均来訪台数/日", 1, 1000, int(base_cap))
     st.divider()
-    st.markdown("**ユーザー層と行動パターンの調整**")
-    regular_ratio = st.slider("定期利用者(週3~5日)の割合 (%)", 5, 80, 20)
+    reg_ratio = st.slider("定期利用者の割合(%)", 0, 100, 30)
     arr_shift = st.slider("到着時間のシフト", -3.0, 3.0, 0.0, 0.5)
-    stay_scale = st.slider("滞在時間の倍率", 0.5, 2.0, 1.0, 0.1)
+    stay_scale = st.slider("滞在時間の倍率", 0.5, 3.0, 1.0, 0.1)
     
-    if st.button("シミュレーション実行", type="primary", use_container_width=True):
-        st.session_state['sim_run_id'] = st.session_state.get('sim_run_id', 0) + 1
+    if st.button("シミュレーションを実行", type="primary", use_container_width=True):
+        st.session_state['trigger_sim'] = True
 
-if 'sim_df' not in st.session_state or st.session_state.get('sim_run_id', 0) > 0:
-    st.markdown("### 🏃 シミュレーション計算中...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    sim_df, all_ids = generate_vgi_simulation_with_progress(
-        t_yr, num_ids, regular_ratio, target_daily, 
-        arr_shift, stay_scale, profile_arrival, profile_stay, 
-        progress_bar, status_text
-    )
-    st.session_state['sim_df'] = sim_df
-    st.session_state['all_ids'] = all_ids
-    st.session_state['sim_run_id'] = 0
-    time.sleep(0.5) # 完了を少し見せる
-    st.rerun() # UIリセット
+if st.session_state.get('trigger_sim', False):
+    pb = st.progress(0); st_txt = st.empty()
+    sim_df, ids = run_simulation(t_yr, num_ids, reg_ratio, target_avg, arr_shift, stay_scale, prof_arr, prof_stay, pb, st_txt)
+    st.session_state['sim_df'], st.session_state['ids'] = sim_df, ids
+    st.session_state['trigger_sim'] = False
+    pb.empty(); st_txt.empty(); st.rerun()
 
-sim_df = st.session_state['sim_df']
-all_ids = st.session_state['all_ids']
-available_dates = sorted(sim_df['date'].unique())
+if 'sim_df' in st.session_state:
+    df_sim = st.session_state['sim_df']
+    tab1, tab2, tab3 = st.tabs(["日別詳細分析", "全体トレンド & 分布", "VGIログ生成(CSV)"])
 
-tab1, tab2, tab3 = st.tabs(["日別比較", "全体トレンド", "VGIログエクスポート"])
-colors = ['#2980b9', '#e67e22', '#27ae60']
+    with tab1:
+        st.markdown("### 指定日の挙動（シミュレーション結果より）")
+        sel_dates = st.multiselect("日付を選択:", sorted(df_sim['date'].unique()), default=sorted(df_sim['date'].unique())[:2])
+        if sel_dates:
+            c1, c2 = st.columns(2)
+            # 滞在台数計算
+            with c1:
+                f1 = go.Figure()
+                for dt in sel_dates:
+                    day_ev = df_sim[df_sim['date'] == dt]
+                    # 10分刻みで滞在台数を計算
+                    t_range = pd.date_range(start=datetime.combine(dt, datetime.min.time()), periods=144, freq='10min')
+                    counts = [((day_ev['in_time'] <= t) & (day_ev['out_time'] > t)).sum() for t in t_range]
+                    f1.add_trace(go.Scatter(x=[t.strftime('%H:%M') for t in t_range], y=counts, name=str(dt)))
+                f1.update_layout(title="滞在台数の推移", template="plotly_white")
+                st.plotly_chart(f1, use_container_width=True)
+            with c2:
+                f2 = go.Figure()
+                for dt in sel_dates:
+                    day_ev = df_sim[df_sim['date'] == dt]
+                    in_h = day_ev.groupby('in_hour').size()
+                    f2.add_trace(go.Bar(x=in_h.index, y=in_h.values, name=f"IN: {dt}"))
+                f2.update_layout(title="時間別入庫台数", template="plotly_white", barmode='group')
+                st.plotly_chart(f2, use_container_width=True)
 
-with tab1:
-    sel_dates = st.multiselect("比較する日付:", available_dates, default=available_dates[:2] if len(available_dates)>1 else available_dates)
-    if sel_dates:
-        p_data = []
-        for i, dt in enumerate(sel_dates):
-            day_df = sim_df[sim_df['date'] == dt]
-            d_p = calc_parked_cars(sim_df, dt)
-            d_io = calc_in_out_hourly(sim_df, dt)
-            p_data.append({'dt': dt, 'parked': d_p, 'inout': d_io, 'raw': day_df})
-                
+    with tab2:
+        st.markdown("### 生成データの統計・分布")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**1. 滞在台数の推移**")
-            f_p = go.Figure()
-            for i, d in enumerate(p_data): 
-                f_p.add_trace(go.Scatter(x=d['parked']['time_str'], y=d['parked']['parked_cars'], name=str(d['dt']), line=dict(color=colors[i%3])))
-            st.plotly_chart(f_p, use_container_width=True)
+            st.markdown("**滞在時間の分布（全ID・通年）**")
+            f3 = px.histogram(df_sim, x="stay_duration", nbins=50, color_discrete_sequence=['#2980b9'])
+            f3.update_layout(xaxis_title="滞在時間 (h)", yaxis_title="サンプル数", template="plotly_white")
+            st.plotly_chart(f3, use_container_width=True)
         with c2:
-            st.markdown("**2. 時間別入出庫ダイナミクス**")
-            f_io = go.Figure()
-            for i, d in enumerate(p_data):
-                f_io.add_trace(go.Bar(x=d['inout']['time_str'], y=d['inout']['in_count'], name=f"IN: {d['dt']}", marker_color=colors[i%3]))
-                f_io.add_trace(go.Bar(x=d['inout']['time_str'], y=-d['inout']['out_count'], name=f"OUT: {d['dt']}", marker_color=colors[i%3], opacity=0.5))
-            st.plotly_chart(f_io, use_container_width=True)
+            st.markdown("**曜日別の平均来訪台数**")
+            w_avg = df_sim.groupby(['weekday', 'date']).size().reset_index(name='count').groupby('weekday')['count'].mean()
+            f4 = px.bar(x=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], y=w_avg.values, color_discrete_sequence=['#7f8c8d'])
+            f4.update_layout(yaxis_title="平均台数", template="plotly_white")
+            st.plotly_chart(f4, use_container_width=True)
 
-with tab2:
-    st.markdown("### 月別・曜日別トレンド")
-    c1, c2 = st.columns(2)
-    with c1:
-        m_t = sim_df.groupby('month').size().reset_index(name='t')
-        st.plotly_chart(px.bar(m_t, x='month', y='t', title="月別総来訪台数"), use_container_width=True)
-    with c2:
-        w_t = sim_df.groupby('weekday').size().reset_index(name='t')
-        w_t['dw'] = w_t['weekday'].map({0:'Mon', 1:'Tue', 2:'Wed', 3:'Thu', 4:'Fri', 5:'Sat', 6:'Sun'})
-        st.plotly_chart(px.bar(w_t, x='dw', y='t', title="曜日別総来訪台数"), use_container_width=True)
-
-with tab3:
-    st.markdown("### VGIシステム用 状態遷移ログ出力")
-    st.info("入庫から出庫前までを `in`、出庫時を `out`、それ以外をすべて `home` で埋めた完全なログを生成します。")
-    
-    if 'vgi_generated' not in st.session_state:
-        st.session_state['vgi_generated'] = False
-
-    if st.button("詳細ログを展開してダウンロード準備", type="primary"):
-        export_progress = st.progress(0)
-        export_status = st.empty()
-        
-        df_vgi = convert_to_full_vgi_format_with_progress(sim_df, t_yr, all_ids, export_progress, export_status)
-        st.session_state['df_vgi_export'] = df_vgi
-        st.session_state['vgi_generated'] = True
-        time.sleep(0.5)
-        export_status.empty() # テキストを消去
-        export_progress.empty() # バーを消去
-
-    if st.session_state['vgi_generated']:
-        df_vgi = st.session_state['df_vgi_export']
-        st.success(f"展開完了: {len(df_vgi):,} 行のデータを生成しました。")
-        st.dataframe(df_vgi.head(1000), use_container_width=True)
-        st.download_button("VGIフォーマットCSVをダウンロード", df_vgi.to_csv(index=False).encode('utf-8'), f"vgi_log_{t_yr}.csv")
+    with tab3:
+        st.markdown("### VGIシステム用ログ出力")
+        st.warning("大規模データの展開を行うため、ボタン押下後に数秒かかります。")
+        if st.button("CSV形式に展開する"):
+            pb = st.progress(60); st_txt = st.empty()
+            df_vgi = generate_vgi_log(df_sim, t_yr, st.session_state['ids'], pb, st_txt)
+            st.success(f"展開完了: {len(df_vgi):,} 行")
+            st.dataframe(df_vgi.head(100), use_container_width=True)
+            st.download_button("CSVをダウンロード", df_vgi.to_csv(index=False).encode('utf-8'), f"vgi_unified_log_{t_yr}.csv")
+            pb.empty(); st_txt.empty()
